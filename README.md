@@ -1,0 +1,800 @@
+# SH-HRMS — Steel Horizon PeopleFlow
+
+An HRMS for Steel Horizon covering projects, modules and resources (internal SH staff and
+service-provider resources), attendance/overtime, Jira-linked task tracking, and monthly invoicing —
+all scoped by role. Placing a resource on a project is a PM action that an **Engineering
+Manager** signs off, and leave is raised by resources for an EM or Admin to decide.
+
+**Stack:** NestJS + Prisma + PostgreSQL · React 19 + Tailwind v4 + Motion
+
+---
+
+## Running it
+
+Requires Node 20+ and **PostgreSQL 18 or newer** (for the built-in `uuidv7()` — see Identifiers below).
+
+```bash
+npm install
+createdb sh_hrms                    # skip if it already exists
+npm run db:migrate                  # apply the schema
+npm run db:seed                     # create the Administrator account
+npm run dev                         # API on :4000, web on :5173
+```
+
+Open http://localhost:5173.
+
+### The first account
+
+`npm run db:seed` **wipes every table** and creates one Administrator. Nothing else — no clients,
+no projects, no people. You build the rest in the app.
+
+| | |
+|---|---|
+| Email | `admin@sh.com` |
+| Password | `Password123!` (override with `SEED_ADMIN_PASSWORD`) |
+
+The sign-in screen has no shortcuts — type the credentials by hand.
+
+The account gets a Resource profile as well as a login. That's optional in the data model, but the
+Resources screen is the only place access levels, passwords and account status are managed, and it
+lists resources — so without a profile this account could never be edited through the UI.
+
+**Setting up from scratch**, in the order the constraints expect:
+
+1. **Service Providers** and **Clients** — or skip ahead; both can be created inline by typing a new
+   name on the resource and project forms.
+2. **Projects**, then their **modules** and **sub-modules**.
+3. **People** on the Resources screen. The access-level dropdown is where you make someone a PM, an
+   Engineering Manager or another Admin.
+4. **Managers on the project** — Admin-only, from the project page: *Managers* for PMs, *Engineers*
+   for the EMs who sign off resource assignments.
+5. **Place resources on the project** — pick the module they'll work on, the role they hold there,
+   and how much of their time it takes.
+
+A project with no Engineering Manager doesn't block anyone: its assignment requests fall back to
+Admins. Leave works the same way.
+
+### Configuration
+
+`apps/api/.env` (an `.env.example` is committed):
+
+```
+DATABASE_URL="postgresql://<user>@localhost:5432/sh_hrms?schema=public"
+JWT_SECRET="change-me-in-production"
+JWT_EXPIRES_IN="7d"
+PORT=4000
+WEB_ORIGIN="http://localhost:5173"
+```
+
+---
+
+## Running with Docker
+
+`docker-compose.yml` brings the whole system up as three containers from this one repo: a
+**PostgreSQL 18** database, the API, and the web app behind nginx. The repo stays a monorepo — each
+image just builds a different workspace from the same root build context.
+
+```bash
+cp .env.example .env                              # set JWT_SECRET — compose won't start without it
+docker compose up -d --build
+docker compose exec api npm run db:ensure-admin   # create the first Administrator
+```
+
+Open http://localhost:8080.
+
+| | |
+|---|---|
+| Web | `http://localhost:8080` — override with `WEB_PORT` |
+| API | `api:4000` inside the compose network; not published to the host |
+| Database | `localhost:5432` — override with `DB_PORT`, for psql or DBeaver |
+
+The database lives in the `db-data` volume: `docker compose down` keeps it, `docker compose down -v`
+deletes it.
+
+**PostgreSQL 18 is not optional.** Every primary key defaults to the built-in `uuidv7()`, which
+older majors don't have — see Identifiers below. The compose file pins `postgres:18-alpine`; a
+database on 17 or below would need a hand-written `uuidv7()` function first.
+
+**nginx serves the bundle and proxies `/api` to the API container**, so the browser only ever talks
+to one origin and CORS never comes into play. That's why the web image leaves `VITE_API_URL` unset —
+the app's `/api` default is already right. Vite inlines that value at **build** time, so pointing the
+app at some other host is a rebuild, not a restart.
+
+**Migrations run on every API start**, from `apps/api/docker-entrypoint.sh`. `prisma migrate deploy`
+is idempotent and never resets; a failed migration fails the container instead of leaving the API
+serving against a stale schema.
+
+**Never run `db:seed` against a database you care about** — it truncates every table.
+`db:ensure-admin` is the one to use: it only adds what's missing and leaves an existing account's
+password, role and profile alone. It reads `SEED_ADMIN_*` from `.env`.
+
+`GET /api/health` is public and pings the database, and is what the API container's health check
+uses. Pointing a health check at an authenticated route returns 401, which reads as unhealthy and
+never routes traffic.
+
+## Identifiers
+
+Every primary key and foreign key is a native Postgres `uuid` column holding a **UUIDv7**,
+generated by the database:
+
+```prisma
+id String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+```
+
+`uuidv7()` is built into **Postgres 18+** (this is the one hard version requirement). Generating
+it in the database rather than in Prisma means any writer gets a correct id — psql, DBeaver, a
+migration, a background script — not just the app.
+
+UUIDv7 embeds a millisecond timestamp in its high bits, so ids sort in creation order. That keeps
+B-tree inserts appending at the right edge of the index instead of scattering like v4, and
+`ORDER BY id` is a valid proxy for `ORDER BY "createdAt"`.
+
+Two `*Id` columns are deliberately **not** uuids:
+
+- `Task.jiraId` — a Jira issue key (`AOP-231`), not an identifier we mint.
+- `AuditLog.entityId` — a polymorphic soft reference paired with `entityType`. Left as text so a
+  malformed value can never turn a log query into a database type error.
+
+## Layout
+
+```
+docker-compose.yml          db + api + web
+apps/
+  api/                      NestJS + Prisma
+    Dockerfile              built from the repo root — workspaces need the root lockfile
+    docker-entrypoint.sh    migrates, then starts
+    prisma/schema.prisma    full data model
+    prisma/seed.ts          wipes everything, creates the Administrator
+    src/
+      common/scope.service.ts   ← all "who can see what" rules live here
+      assignments/              ← the EM approval gate; only writer of ResourceAssignment
+      leave/                    ← resources raise, EM/Admin decide
+      auth/ users/ resources/ clients/ service-providers/ projects/
+                                (users/ is just the manager-picker lookup)
+      attendance/ tasks/ invoices/ audit/ notifications/ dashboard/
+  web/                      React + Vite
+    Dockerfile              vite build → nginx
+    nginx.conf              SPA fallback + /api proxy to the API container
+    src/
+      components/ui/        design system (Button, Table, Modal, StatusPill…)
+      components/layout/    sidebar, topbar, app shell
+      features/             CheckInOutCard, ApprovalActions, ResourceFormModal
+      pages/                one file per screen
+      lib/                  api client, auth, theme, motion vocabulary, formatters
+```
+
+---
+
+## How the rules are implemented
+
+### People vs. roles
+
+**Everyone is a Resource.** `Resource` is the person — name, contact, `type` (SH/EXTERNAL),
+`company`, employee code, designation. `User` is their login, and `User.role` is nothing more
+than *authority* layered on top.
+
+So a Project Manager is a resource who also runs projects. They can be internal **or borrowed
+from a service provider**. Because a PM has a real profile, they count as a person everywhere: they can be
+placed on a module, hold a role on that project, and appear in the Resources list.
+
+An **Engineering Manager** is the same shape: a resource, scoped to specific projects, with the
+same authority over them as a PM. The one thing that separates the two is the assignment gate —
+a PM *asks* to put someone on a project, an EM *decides*. See
+[Resource assignment needs an EM](#resource-assignment-needs-an-em) below.
+
+An Admin's profile is *optional* — a pure system account can approve invoices without having an
+HR record, it just can't raise one of its own.
+
+**One creation path.** Everyone is created on the Resources screen:
+
+- An **Admin** sees an "Access level" dropdown (Resource / Project Manager / Engineering Manager
+  / Administrator).
+- A **PM or EM** sees no dropdown at all, so they can only ever add plain resources — never a
+  manager of any kind. The server forces the role down regardless of what's posted, so it isn't
+  just a hidden field.
+
+**Resetting a password is Admin-only.** A PM sets the *initial* password when they onboard
+someone — that's issuing credentials. Changing an existing one afterwards is account recovery, not
+profile maintenance, so `ResourcesService.update` refuses `password` from anyone but an Admin and
+the field is hidden from the edit form for PM and EM. Everything else on the profile stays editable
+by a PM within their scope.
+
+**One screen, not two.** Authority is granted or revoked on that same Resources screen — the
+access-level dropdown when editing someone, and the access-level filter to find who holds what.
+There is no separate Managers screen: it duplicated the resource form field for field, since
+`Resource.status` already drives `User.isActive` and the role dropdown already sets `User.role`.
+`/managers` redirects to `/resources` so old links still land somewhere useful.
+
+Demoting a manager who still holds projects is blocked until those projects are reassigned, and a
+PM can never edit or delete someone holding elevated access even when that person is visible on
+one of their projects.
+
+That block runs in **both directions between PM and EM**, not just downwards to Resource. The two
+roles are scoped through different tables (`ProjectManager` vs `ProjectEngineeringManager`), so
+flipping someone from PM to EM while they still manage projects would leave those projects naming
+them as manager while they silently vanish from that person's view. Promotion to Admin is always
+allowed — an Admin sees everything regardless of which table binds them.
+
+### Permission scoping
+
+Every list and mutation funnels through **`apps/api/src/common/scope.service.ts`**, so the
+matrix lives in exactly one place rather than being re-derived per controller.
+
+- **Admin** — unrestricted. `RolesGuard` short-circuits for `ADMIN`, so anything a PM, EM or
+  Resource can do, an Admin can do for anyone.
+- **PM** — sandboxed to projects assigned to them, plus resources they created. Concretely,
+  a PM sees a resource if `createdById = them` **or** the resource is placed on one of their
+  projects.
+- **EM** — the *same* sandbox, read through `ProjectEngineeringManager` instead of
+  `ProjectManager`. `managedProjectIds()` picks the table off the role, so every downstream rule
+  — resources, tasks, attendance, leave, audit — inherits EM scoping without knowing EM exists.
+- **Resource** — their own records only.
+
+`RolesGuard` does **not** short-circuit for EM, so every controller that admits one lists
+`Role.EM` explicitly.
+
+**Scoping is derived in one place.** Any service that needs "which projects is this person bound
+to" calls `ScopeService.managedProjectIds`, which reads `ProjectManager` for a PM and
+`ProjectEngineeringManager` for an EM. Re-deriving it locally is the bug to watch for: the client
+and service-provider registers each matched on `project.managers` directly, which quietly meant an
+**EM saw an empty register** — their own project's client was missing from a screen they had access
+to. Both now go through `ScopeService`.
+
+Two metadata leaks were closed at the same time. `GET /audit/actions`, which fills the audit
+filter dropdown, was a global `distinct` — it advertised every action type anyone in the org had
+ever performed, and offered filters that could only return nothing. It is now restricted to the
+caller's own visible trail. And `GET /users/managers` was open to PM and EM although its only
+consumer is the Admin-only project pickers, so any PM could read the org-wide manager roster; it is
+Admin-only now.
+
+**Invoicing and leave are the exceptions to PM authority.** Only an Admin sees other people's
+invoices or approves them, and only an EM or Admin decides leave — a PM reads it. A PM raises and submits their own, exactly like a resource —
+see below.
+
+The frontend mirrors this for affordances (nav items, buttons), but the server is the
+authority — every scoped endpoint re-checks.
+
+### What an Admin does and doesn't do
+
+An Admin oversees rather than participates, so two capabilities are closed to them:
+
+- **No attendance.** `POST /attendance/check-in` and `/check-out` return 403 for an Admin, and the
+  clock card is hidden on both their dashboard and the Attendance screen. They still see the full
+  daily log and the overtime approval queue — they review attendance, they just don't record it.
+  PMs *do* clock in, so the control appears on a PM's dashboard too.
+- **Never a payee.** An Admin can't raise an invoice for themselves (`canInvoice` is false), but
+  **can raise one on behalf of a PM or resource** (`canRaiseForOthers`). The invoice belongs to the
+  payee, lands in the queue as theirs, and the audit line records who raised it —
+  *"Submitted invoice … for Sara Khan (raised by the Admin)"*. `GET /invoices/payees` lists who is
+  eligible: internal (SH) profiles only, Admins excluded.
+
+An Admin approving an invoice they raised for someone else is fine; approving *their own* is still
+blocked, which is now unreachable by construction.
+
+### Resource assignment needs an EM
+
+A PM decides *what* the project needs; an Engineering Manager decides *who* it gets. So placing a
+resource on a project is a request, not a write:
+
+```
+PM  ──request──>  AssignmentRequest (PENDING)  ──EM approves──>  ResourceAssignment
+                          │
+                          └── rejected / withdrawn ──> no placement, ever
+```
+
+**A pending request is inert.** It is not a draft edit of something that already exists — the
+placement does not exist. The person isn't on the roster, holds no
+allocation and appears in no scoping query. That's why the project page lists pending requests in
+their own block *above* the assigned-resources list rather than greyed out inside it: showing them
+in the roster would make the roster wrong.
+
+**Who skips the queue.** Anyone who could approve the request approves it by making it:
+
+| Actor | Placing a resource |
+|---|---|
+| Admin | Assigns directly |
+| EM, on a project they hold | Assigns directly |
+| EM, on someone else's project | Outside their scope — 403 |
+| PM | Raises a PENDING request |
+
+**A project with no EM doesn't block its PMs.** The request is still raised, and routes to Admins
+instead (`ScopeService.assignmentApprovers`). Work is never stuck waiting for an Admin to wire up
+an EM first — but nothing is ever placed without *someone* deciding.
+
+**One code path.** `POST /resources/:id/assignments` delegates to
+`AssignmentsService.assignOrRequest`, which is the only place in the codebase that writes a
+`ResourceAssignment`. It answers "does this need approval?" once and returns
+`{ pending, request, assignment }` so the caller can say which of the two happened — the UI
+switches its button between *Assign* and *Request* off the same rule, and its toast off the
+server's actual answer rather than a guess.
+
+Duplicate protection covers both states: you can't request a placement that already exists, and
+you can't queue a second request for one already pending — the error names the PM who got there
+first. On approval the check runs **again**, because the world may have moved while the request
+sat in the queue.
+
+**Removal is not gated.** Taking someone off a project stays an immediate PM action, so a PM can
+undo their own mistake without waiting on anyone. Only joining needs sign-off.
+
+Every step is on the audit trail (`ASSIGNMENT_REQUESTED`, `ASSIGNMENT_APPROVED`,
+`ASSIGNMENT_REJECTED`, `ASSIGNMENT_REQUEST_WITHDRAWN`) and notified both ways: approvers hear
+about a new request, the requesting PM hears the decision and the note that came with it.
+
+**The queue** lives at `/assignment-requests` and serves both sides of the fence — an EM sees what
+to decide, a PM sees where their asks got to, and the nav item is labelled accordingly
+("Assignments" vs "My Requests"). Rows carry `canDecide` / `canCancel` computed server-side, so
+the UI never renders a button the API would refuse.
+
+### Attendance and overtime
+
+`apps/api/src/attendance/attendance.constants.ts` holds the arithmetic:
+
+```
+break   = 0                        if elapsed <= 6h
+        = min(1h, elapsed − 6h)    otherwise
+payable = elapsed − break
+work    = min(payable, 8h)
+OT      = max(payable − 8h, 0)     → raised PENDING
+```
+
+**The 1-hour break only applies past 6 hours** — a short shift takes no deduction.
+
+The `min(1h, elapsed − 6h)` term phases the break in between 6h and 7h rather than
+applying it as a cliff. Without it, a 6h01m shift would pay 5h01m — an hour *less* than
+clocking out at 6h exactly. Instead:
+
+| Shift | Break | Work | OT |
+|---|---|---|---|
+| 5h | 0m | 5h | — |
+| 6h | 0m | 6h | — |
+| 6h01m | 1m | 6h | — |
+| 6h30m | 30m | 6h | — |
+| 7h | 60m | 6h | — |
+| 9h (09:00–18:00) | 60m | 8h | — |
+| 11h (09:00–20:00) | 60m | 8h | 2h |
+
+Longer is never worth less, at any minute across the range. The brief's two worked
+examples are unchanged.
+
+`Attendance.breakMinutes` stores the break **actually applied** to that shift, so the UI
+never claims a deduction that didn't happen.
+
+The table carries a **Total** column — working hours + overtime. Since the unpaid break is already
+taken out of both, that total *is* payable time, not elapsed time. The same figure appears as a
+"Total hours" stat above the table.
+
+**Filter by name** narrows both tabs (daily log and the overtime queue), and lives in the URL so a
+filtered view is shareable.
+
+**Export timesheet** (`GET /attendance/export`) produces the monthly timesheet the team already
+keeps by hand, rather than a flat log:
+
+```
+Date · Day · Shift · Clock In · Clock Out · Normal Hours ·
+Overtime Hours · Weekend Hours · Notes · STAT SCREENSHOTS
+```
+
+**One tab per person**, because a timesheet belongs to one person and gets signed off that way.
+Filter to a person and you get one tab; filter to a project and you get a tab each.
+
+**Every calendar day in the period gets a row**, whether or not anything was logged — a timesheet is
+a record of the month, and a blank day is itself information. Days with no record read `N/A`.
+
+Worked time lands in **Normal Hours** on a weekday and **Weekend Hours** on a Saturday or Sunday,
+with the other reading `N/A`, so the two can never double-count and each column total means
+something. Weekend rows are tinted to match.
+
+The period is the **current month** unless From/To are set, and the same window bounds the query —
+the sheet and its rows can't disagree about what they cover. A single-person export still produces
+their tab for a month in which they recorded nothing, since "I logged nothing" is a real answer;
+that lookup re-checks scope, so asking for someone outside it returns nobody rather than leaking a
+name.
+
+Two columns are placeholders by design: **Shift** always reads `Day` (there is no shift model yet)
+and **STAT SCREENSHOTS** is left empty for whoever pastes them in. `Discord Hours` from the original
+sheet is deliberately dropped.
+
+One check-in/out pair per person per day (`@@unique([userId, date])`). Back-dating a record is
+an Admin/PM correction tool only; Resources always clock in at "now".
+
+### Leave
+
+Two rules define the module, and both are enforced in `LeaveService` rather than only at the
+guard, because neither is something a role decorator can express on its own:
+
+- **Only a resource raises leave.** A PM, EM or Admin cannot — even though all three have Resource
+  profiles, so the check is on `role`, not on whether a profile exists.
+- **Only an EM or an Admin decides it.** Either settles it; there is no countersigning. The EM must
+  hold one of the projects that resource is actually placed on.
+
+```
+Resource ──request──>  LeaveRequest (PENDING)  ──EM *or* Admin decides──>  APPROVED / REJECTED
+```
+
+**A PM sees leave but cannot decide it.** They are not an approver, yet who is away next is
+planning information they need — so the Leave screen is read-only for them (no decide buttons, no
+request button) and their dashboard carries an "Away soon" card. Rows come back carrying
+`canDecide` / `canWithdraw` computed server-side, so no view renders an action the API would refuse.
+
+**Counting is whole working days, Mon–Fri.** `leave.constants.ts` holds the arithmetic:
+
+| Range | Days |
+|---|---|
+| Mon → Mon | 1 |
+| Fri → Mon | 2 |
+| Mon → Fri | 5 |
+| Sat → Sun | 0 — refused, there is nothing to book off |
+
+The count is computed on the server and **stored on the row**, so an approved request keeps the
+figure it was approved on even if the counting rule later changes. The request form mirrors the
+same function to preview the number while you pick dates — you never submit blind — but the server
+recomputes it and its answer is the one that persists.
+
+**Public holidays are not modelled** anywhere in the system, so a range covering one still counts
+it. Worth knowing before this feeds anything like payroll.
+
+**A day can only be booked once.** A new request overlapping one that is `PENDING` or `APPROVED`
+is refused, naming the dates that clash. A *rejected* request holds nothing, so those dates are
+free again.
+
+`OTHER` requires a reason — the type says nothing on its own — and the form enforces it before the
+server has to.
+
+**Withdrawing** is the resource's own escape hatch: a pending request can be pulled back, which
+frees the dates and removes it from the approver's queue. Once decided it can't be withdrawn, only
+superseded by a new request.
+
+**No entitlement or balance.** There is no annual allowance, accrual or carry-over, and nothing
+blocks on a quota. The screen reports **days taken** — approved leave only, for the calendar year —
+because a pending request hasn't been granted yet.
+
+Every step lands on the audit trail (`LEAVE_REQUESTED`, `LEAVE_APPROVED`, `LEAVE_REJECTED`,
+`LEAVE_WITHDRAWN`) and notifies both ways: approvers hear about a new request, the resource hears
+the decision and the note that came with it.
+
+### Tasks
+
+A local tracker, **not** a live integration with any tracker — it stores the ticket ID, ticket link
+and MR link as metadata for visibility. The fields are named `ticketId` / `ticketUrl` rather than
+`jira*`, because a ticket can come from Jira, Linear, Azure Boards or anything else. Creation rules: a Resource may only create tasks for themselves on
+projects they're on; a PM may assign to resources on their own projects; an Admin to anyone.
+
+Every status change writes a `TASK_STATUS_CHANGED` audit entry with before/after, visible both in
+the task detail drawer and the Audit screen.
+
+**Severity is a separate axis from priority.** `Task.severity` (`S1` Critical, `S2` Major, `S3`
+Minor, `S4` Cosmetic) records *how bad the problem is*; priority records *what we're doing about
+it*. A cosmetic bug can be urgent before a launch and a critical one can be deferred, so collapsing
+them into one field loses information. It's optional — tasks raised before it existed have none,
+and it isn't always known up front.
+
+**Export to Excel** (`GET /tasks/export`) deliberately reproduces the incident-log layout the team
+already keeps in a spreadsheet, so the file can be dropped straight into theirs:
+
+```
+DATE · TICKET ID · SEVERITY · PRIORITY · STATUS · STREAM · TAKEN BY ·
+Problem Summary & Proactive Action Taken · TICKET LINK · MR TITLE · MR LINK
+```
+
+Three of those are mappings rather than fields:
+
+- **DATE** — when the task was created, so the sheet reads one row per issue dated when it came in
+- **STREAM** — the module, narrowed to `Module › Sub-module` where the task has one
+- **Problem Summary** — the task title
+
+`TICKET LINK` and `MR LINK` are written as **real hyperlinks**, blue and underlined, not link text.
+The `Export info` sheet spells out each mapping so nobody has to guess what DATE or STREAM mean.
+
+It applies **the same filters and the same role scoping as the table**, minus paging: a resource
+exports their own tasks, a PM or EM those on their projects, an Admin everything. The totals row
+carries the count plus the status split (`3 tasks` · `In Progress: 2 · Todo: 1`). Capped at 5000
+rows, and synchronous — the spec wants large exports handled asynchronously with an expiring
+download, which is still outstanding.
+
+Moving a ticket always opens a confirm prompt with an **optional reason**, so "why did this go back
+to Blocked?" stays answerable. The reason is appended to the audit summary
+(*Moved "…" from TODO to BLOCKED — Blocked on the CAA data feed*); leaving it blank is fine and
+records nothing extra. Cmd/Ctrl+Enter commits, so the prompt doesn't slow down a quick move.
+
+### Invoicing
+
+An invoice belongs to a **User**, not a Resource — PMs and Admins have no resource profile
+but still need to invoice, and bank/address details live on the invoice itself anyway.
+
+**Who can raise one:** whoever's profile says `type = SH`. **Role is irrelevant here** — an
+external PM borrowed from a service provider bills through their own company exactly like an external
+resource does, and someone with no profile at all has no payee record. Ineligible people are
+blocked at three layers: the nav hides it, the page shows an explanatory empty state, and the
+API returns 403.
+
+**Who can approve one: Admin only.** A PM or EM submits their own and waits, like everyone else —
+approving *assignments* grants an EM no authority over *money*.
+
+| | Admin (SH) | PM / EM (SH) | PM / EM (External) | Resource (SH) | Resource (External) |
+|---|---|---|---|---|---|
+| Raise & submit own | ✅ | ✅ | ❌ | ✅ | ❌ |
+| See others' invoices | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Approve / reject | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+Nobody decides their own invoice, Admin included.
+
+Submitting notifies **Admins only** (overtime still notifies PMs *and* Admins — that authority
+didn't change).
+
+**Currency.** Every invoice carries its own — `MYR` or `PKR` (`Currency` enum), required on
+create, and the form's line rates and running total render in the chosen one.
+
+That has a consequence worth stating: **money is never summed across currencies.** There is no
+single "total value" figure anywhere — `GET /invoices/summary` groups by status *and* currency and
+returns `totalsByCurrency`, so a mixed set reads `RM 12,160.00 · Rs 18,408.00` rather than a
+meaningless combined number. Both currencies are pinned to 2 decimal places, since `en-PK` would
+otherwise render PKR as whole rupees and misalign the column.
+
+Flow is `Draft → Submitted → Approved/Rejected`. Editing a rejected invoice returns it to draft
+so it can be corrected and resubmitted.
+
+### Clients and Service Providers
+
+Two registers, mirroring how work and people actually arrive:
+
+```
+Client          ──> Projects     who gives us work
+ServiceProvider ──> Resources    who gives us people
+```
+
+Both follow the same pattern:
+
+- **Admin owns the register** — the Clients and Service Providers screens (search, add, edit, delete,
+  and a detail view: a client's projects, a service provider's people).
+- **A PM can still coin one inline** — typing a new client name on the project form, or a new
+  service provider name when onboarding an external resource. Otherwise a PM would be blocked waiting on an
+  Admin before they could start work.
+- Names are unique case-insensitively, so the same organisation can't fork into two records.
+- Deletion is blocked while dependants exist (`Project.clientId` and `Resource.serviceProviderId` are both
+  `onDelete: Restrict`), and the services translate that into readable copy naming the count.
+
+**Internal seniority** (`Resource.internalSeniority`) is free text that *we* set for an external
+resource — how Steel Horizon grades them, independent of whatever designation their service provider gives
+them. It only applies to `EXTERNAL` people: the field is hidden for internal ones, the service
+ignores it on create and clears it if a resource is switched to internal, so it can't go stale.
+It's searchable and shows on the Resources list, the resource detail, and the service provider's roster.
+
+`Resource.serviceProviderId` is a real relation, not the free-text company string it started as. That
+means an external resource can't exist without a named service provider, an internal one can never
+carry one, and the service-provider headcount on the dashboard comes off the relation rather than
+string-grouping.
+
+### Clients
+
+Two ways in, deliberately:
+
+- **The project form** keeps the free-text-with-lookup behaviour from the brief — pick an
+  existing client or type a new name, and `findOrCreate` materialises it on save. A PM can do
+  this, so nobody is blocked waiting on an Admin to register a client first.
+- **The Clients screen** (Admin-only) is the register itself: search, add, edit, delete, plus a
+  detail view listing that client's projects with their managers and status.
+
+Name matching is case-insensitive throughout, so "Preesoft" and "preesoft" can never fork into
+two records — the create/rename paths reject a clash with the existing spelling in the message.
+
+Deleting is blocked while a client still has projects (`Project.clientId` is `onDelete: Restrict`);
+the service turns that constraint into readable copy naming the count rather than leaking a
+foreign-key error.
+
+A PM's client list is scoped to clients behind their own projects; Admin sees all.
+
+### What a resource sees of their project
+
+`GET /projects/mine` powers a resource's **My Projects** tab: the projects they're placed on, their
+own placements with role and allocation, and the people sharing each module they're on. Colleague
+rows carry name, title and provider — no allocation, email or phone. There is no mutation on the
+screen and none behind it.
+
+It exists because `GET /projects/:id` is a *manager's* payload — managers, engineers, every
+placement, headcount and the **pending assignment requests**. A resource placed on the project could
+previously read all of it, since `assertProjectAccess` counts a placement as access. Both the project
+list and detail are now `Roles(ADMIN, PM, EM)`; `GET /projects/options` stays open because the
+resource's task and attendance filters need it, but it returns the bare project to a resource rather
+than the approval routing.
+
+A sweep of all 48 GET endpoints as a resource turned up a third instance: `GET /dashboard` returned
+`structureOverview`, which carries per-project headcount and the internal/external resource mix. The
+resource view only ever used its length, so it now comes back empty for a resource and the stat card
+reads `stats.projects` instead.
+
+### Placing a resource on a project
+
+A **placement** (`ResourceAssignment`) is the single record that puts someone on a project:
+
+> *person + project + (optional module → sub-module) + role on the project + allocation %*
+
+Every "assign" surface writes this same record through the same endpoint
+(`POST /resources/:id/assignments`), and `AssignmentsService.assignOrRequest` is the only code path
+that creates one. Two screens reach it, differing only in which side you start from:
+
+- **Project → Assigned resources → Assign** — one project, many people at once. The module is
+  pre-filled from where you clicked, and one role and allocation apply to everyone picked. Only
+  lists people **not already on the project**.
+- **Resource → Assign to project** — one person, pick a project. This is also the only way to add a
+  *second* placement on a project someone is already on (two modules at 50% each, say), since the
+  project screen filters them out.
+
+Each screen has exactly **one** assign affordance (plus the empty-state call to action), and both
+ask the *server* whether the placement needs approval: `GET /projects/options` and
+`GET /projects/:id` both return `needsAssignmentApproval` and `approverNames` for the current
+caller, computed from `ScopeService`. No screen re-derives the rule, and the success message is
+driven by the response's `pending` flag rather than an assumption — so a PM is told their placement
+was *sent for approval*, never that it was assigned.
+
+**Placements are per module, so one person can hold several on the same project.** The roster groups
+them: one row per person, carrying every placement they hold there.
+
+**Whole project vs a module.** Leaving the module blank means *works across the project, not tied to
+one part*. Picking a module scopes them to it. The two are different placements, and a person can
+hold both — say project-level at 60% plus a module at 40%.
+
+That distinction used to read as a bug in two places, both now fixed:
+
+- **A module showed "nobody assigned" while people were on the project.** Technically correct — a
+  project-level placement isn't scoped to any module — but it looked like the project was empty.
+  `moduleDetail` / `subModuleDetail` now also return `broaderAssignments`: people on the project (or
+  the parent module) who aren't narrowed to this one. They're listed in their own section, labelled,
+  and deliberately *not* counted among the module's own placements.
+- **The picker hid people already on the project.** `available-resources` excluded anyone with any
+  placement on the project, so someone placed at project level could never be added to a module from
+  the project screen. It now excludes only the **exact** placement — same module and sub-module — and
+  returns each candidate's existing placements, so the picker shows *"Already on Whole project ·
+  100% allocated"* instead of hiding them.
+
+The resource screen mirrors this: every project stays in its dropdown, annotated with how many
+placements the person already holds there, and the scopes they already occupy are **disabled** rather
+than left to fail on submit.
+
+**Staffing candidates are not limited to your own people.** `available-resources` deliberately does
+*not* apply `resourceWhere`. That scope answers "whose record may I manage" — people you onboarded,
+or who already work on your projects. Staffing asks a different question: who *could* work here.
+Filtering the picker by record scope meant a PM could only request people **already on their
+project**, which is the one case the request flow exists for. The gate is the approval, not the
+picker.
+
+The two authorities stay separate, and that separation is the point:
+
+| | PM's own project | Someone else's record |
+|---|---|---|
+| Request them onto the project | ✅ | — |
+| Read / edit / delete their profile | — | ❌ 403 |
+
+So a PM can ask for anyone active, an EM decides, and only once the placement exists does that
+person enter the PM's record scope. Placing still requires `assertProjectWrite`, so a PM can never
+place anyone onto a project that isn't theirs. The picker also drops `email` from its projection —
+it renders code, designation and provider, so the address was needless exposure.
+
+**Only plain Resources are placed.** Someone holding elevated access is attached to a project by
+being made its **PM** or **EM**; an Admin already oversees every project, and per the rules above
+doesn't participate in delivery at all. So Admins, PMs and EMs are filtered out of the resource
+picker, the Assign action is hidden on their profile, and `AssignmentsService.validatePlacement`
+refuses the write with a message pointing at the right surface — *"Murwa Tariq holds Project Manager
+access. Attach them to the project as its Project Manager instead."*
+
+They remain selectable as **task assignees** on projects they run, which comes off
+`ProjectManager` / `ProjectEngineeringManager` rather than a placement — so nothing is lost by not
+placing them. (Fixed alongside: EMs were missing from that list and could only be picked if they
+happened to be placed.)
+
+### One row per person
+
+A resource can hold several placements on the same project — two modules at 50% each, say.
+The Assigned resources tab was rendering the raw `ResourceAssignment` rows, so those people
+appeared two or three times and the tab counted assignments rather than people.
+
+`GET /projects/:id/resources` now groups server-side: **one entry per person**, carrying every
+placement they hold on that project and their task counts. The tab counts people
+(7, not 11), the row summarises their placements inline, and opening it shows the full picture —
+each module/sub-module with its allocation and the role held there, and the
+workload. Placements can be removed individually, with a warning when it's their last one.
+
+### Drilling in
+
+Nothing in the project page is a dead end:
+
+- **A person** opens a detail modal in place — every placement they hold on the project, the role
+  and allocation on each, and their workload.
+- **A module or sub-module** opens a modal showing its people (with allocation and role), its
+  task-status breakdown and open work — instead of just a count. Sub-modules drill one level
+  further.
+
+### Role on a project
+
+`ResourceAssignment.roleOnProject` records what someone does *on that project*, separate from
+`Resource.designation`, which is their company-wide job title. So the same engineer is "Tech Lead"
+on one project and "BE Developer" on another at the same time, and it shows on the project roster,
+the resource's own profile, the module drill-down and the approval queue.
+
+It's optional — a placement is meaningful without it, and the project screen places several people
+at once — and it's set when the placement is created. There is no edit-placement endpoint, so
+correcting it today means removing the placement and adding it again.
+
+> **Teams were removed.** They were descriptive only: they granted no authority, owned no tasks
+> (a task attaches to a project/module and an individual), and a team manager appeared in no
+> permission check anywhere. Their one useful field was the title someone held on a project, which
+> now lives on the placement itself as `roleOnProject`. `/teams` redirects to `/projects`.
+
+### Project managers
+
+`Project ↔ User` is many-to-many via `ProjectManager`, and again via `ProjectEngineeringManager`
+for the EM side. Modules and placements hang off the **project**, never off either kind of manager,
+so reassigning them (Admin-only, both) leaves all project data intact.
+
+The EM side is a separate table rather than a role column on `ProjectManager` so that every
+existing PM query is untouched, and a project can carry both kinds independently. Moving EMs on or
+off a project notifies them, and tells an incoming EM how many requests are already waiting.
+
+**Admins are not candidates for either role.** They already see and can do everything on every
+project, so naming one as a PM or EM grants no authority — it only made the same person appear in
+both pickers, reading as though the roles were interchangeable. They aren't: a PM *requests*
+resources, an EM *approves* them. `GET /users/managers?role=PM|EM|PM,EM` returns exactly the roles
+asked for and never an Admin, `setManagers` accepts PMs only, `setEngineers` EMs only, and each
+picker shows the role on every row so there's no doubt which list you're looking at.
+
+
+
+---
+
+## Design notes
+
+- **Dark sidebar, light content**, card + table layout, following the PeopleFlow reference.
+- **Colour carries meaning only** — green approved/done, amber pending, red rejected/overdue,
+  blue in-flight, neutral draft. Everything else is greyscale.
+- **Dark mode** throughout, class-driven with a pre-paint script so there's no flash.
+- **Tables are first-class** on data-dense screens — sortable, filterable, horizontally scrollable
+  inside their own container so the page never scrolls sideways.
+- **Progressive disclosure** — search stays visible, everything else hides behind "Filters" with
+  an active-count badge. Filter state lives in the URL, so views are shareable and notification
+  deep-links work.
+- **Motion is 150–300ms, ease-out, never bouncy.** It marks state changes: status pills cross-fade
+  on change, rows collapse their height on delete, the nav underline slides between tabs, the
+  check-in card morphs between idle → running → complete, and the live OT bar turns amber when
+  you pass 8h. `prefers-reduced-motion` is honoured.
+- **Nothing waits on an animation to render.** Page transitions and tab panels are **enter-only** —
+  a keyed `motion.div`, never `AnimatePresence mode="wait"`. Under `mode="wait"` the incoming child
+  can't mount until the outgoing one finishes exiting, which delayed every switch and, when a
+  transition was interrupted by a second click, left the new content mounted at its `initial`
+  variant: present in the DOM at `opacity: 0`, with no error to show for it, and every later route
+  inheriting the stuck state. `pageVariants` and `panelVariants` therefore define no `exit`, so the
+  race cannot happen.
+
+  `AnimatePresence` is still used where it earns its keep — genuine mount/unmount transitions such
+  as table rows collapsing on delete, modals, dropdowns, and the check-in card's idle → running →
+  complete morph. Those run in the default *sync* mode, which never blocks the incoming child.
+- **Lists keep their rows while refetching.** Every paginated query passes
+  `placeholderData: keepPreviousData`, so changing a tab, filter or page swaps the data in place
+  instead of replacing the table with a skeleton and jumping the layout. Skeletons appear only on a
+  genuinely cold load. Stat rows reserve their space for the same reason.
+
+Measured on the production build against the local API: first visit to a screen ~190ms, subsequent
+navigations 60–130ms, API responses 11–34ms. `npx vite preview` proxies `/api` exactly as the dev
+server does, so those numbers can be re-checked without a deploy — dev-mode timings are inflated by
+StrictMode's double render and unminified modules.
+- **Role-adaptive** — a Resource's dashboard leads with the check-in button; an EM's leads with
+  "Needs your action". They're different screens, not one screen with things hidden. A PM's
+  pending requests deliberately sit *outside* that amber panel in a neutral "Waiting on approval"
+  card — they're someone else's decision, so presenting them as the PM's to-do would be a lie.
+
+---
+
+## Open items from the brief
+
+Two were flagged as not finalized and are built to extend rather than guessed at:
+
+- **Project fields** beyond name/client/status — currently also carries `code`, `description`,
+  `startDate`, `endDate`. Adding more is a schema field plus a form field.
+- **Resource fields** beyond name/contact/type — currently also `employeeCode`, `designation`,
+  `location`, `joinedAt`, `notes`, `status`.
+
+One item worth tightening before production:
+
+- **Onboarding credentials.** Creating a resource also creates their login account. Whoever adds
+  them can type a starting password; if they leave it blank it falls back to `ChangeMe123!`. The
+  app never emails it out and never forces a change at first login, so that fallback stays valid
+  until someone resets it — fine for the demo, worth tightening before real staff are onboarded
+  (email an invite link, or require a reset on first sign-in).

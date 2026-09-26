@@ -1,0 +1,101 @@
+# SH-HRMS — the whole monorepo as three containers: PostgreSQL, the NestJS API,
+# and the React app behind nginx. No repo split; each image just builds a
+# different workspace from the same root context.
+#
+#   cp .env.example .env          # set JWT_SECRET and the admin password
+#   docker compose up -d --build
+#   docker compose exec api npm run db:ensure-admin
+#
+# Then open http://localhost:8080.
+#
+# Migrations run on every API start (apps/api/docker-entrypoint.sh).
+# `db:ensure-admin` is separate and deliberate: it only adds what's missing.
+# Never run `db:seed` against a database you care about — it truncates
+# every table.
+
+name: sh-hrms
+
+services:
+  # --------------------------------------------------------------- db -------
+  db:
+    # 18 is a hard requirement, not a preference: every primary key defaults to
+    # the built-in uuidv7(), which older majors don't have.
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sh_hrms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sh_hrms}
+      POSTGRES_DB: ${POSTGRES_DB:-sh_hrms}
+    ports:
+      # Host-side only, for psql/DBeaver. The API reaches it over the compose
+      # network and doesn't need this published at all.
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      # Postgres 18 declares /var/lib/postgresql as the volume and keeps its
+      # data one level deeper, so mount the parent — not .../data.
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      # The API's first act is a migration, so it has to wait for a database
+      # that accepts connections, not merely a container that started.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sh_hrms} -d ${POSTGRES_DB:-sh_hrms}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # -------------------------------------------------------------- api -------
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-sh_hrms}:${POSTGRES_PASSWORD:-sh_hrms}@db:5432/${POSTGRES_DB:-sh_hrms}?schema=public"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      PORT: 4000
+      # Only consulted when something reaches the API directly. Through the web
+      # container every request is same-origin, so CORS never applies.
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
+      # Read by `db:ensure-admin`, which you run by hand — nothing reads these
+      # on a normal start.
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@sh.com}
+      SEED_ADMIN_NAME: ${SEED_ADMIN_NAME:-Admin}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+    healthcheck:
+      # /api/health is public and pings the database — a process that is
+      # listening but can't reach Postgres serves nothing useful.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # Generous: the first start also applies migrations before it listens.
+      start_period: 60s
+
+  # -------------------------------------------------------------- web -------
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  db-data:
