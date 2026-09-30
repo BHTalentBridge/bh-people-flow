@@ -5,7 +5,7 @@
 # workspace cannot install.
 
 # --------------------------------------------------------------- deps -------
-FROM node:22-alpine AS deps
+FROM public.ecr.aws/docker/library/node:26.7.0-alpine3.23 AS deps
 WORKDIR /app
 
 # Prisma's query engine links against OpenSSL on musl.
@@ -27,7 +27,7 @@ RUN npm run prisma:generate -w @sh-hrms/api \
  && npm run build -w @sh-hrms/api
 
 # ------------------------------------------------------------ runtime -------
-FROM node:22-alpine AS runtime
+FROM public.ecr.aws/docker/library/node:26.7.0-alpine3.23 AS runtime
 WORKDIR /app
 RUN apk add --no-cache openssl
 ENV NODE_ENV=production
