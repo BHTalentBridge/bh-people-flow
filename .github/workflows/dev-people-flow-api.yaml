@@ -25,7 +25,7 @@ env:
   SERVICE_NAME: people-flow-api
   ENVIRONMENT: dev
   ECR_REPOSITORY: dev-people-flow-api
-  ECS_CLUSTER: dev-people-flow-cluster
+  ECS_CLUSTER: dev-talentbridge-cluster
   ECS_SERVICE: MSPeopleFlowAPI
   ECS_TASK_DEFINITION: dev-people-flow-api
   OIDC_ROLE_ARN: ${{ vars.OIDC_ROLE_ARN }}
@@ -46,16 +46,6 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v7
-
-      # TEMPORARY: prints the OIDC claims so the IAM trust policy can match them. Remove once the role assumes.
-      - name: Print OIDC claims
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const token = await core.getIDToken('sts.amazonaws.com');
-            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
-            core.info(`sub=${claims.sub}`);
-            core.info(`aud=${claims.aud} repository=${claims.repository} ref=${claims.ref} event=${claims.event_name}`);
 
       - name: Configure AWS Credentials for GitHub Role
         id: aws-creds
