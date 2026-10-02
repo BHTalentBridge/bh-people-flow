@@ -3,7 +3,7 @@
 # The build context is the REPO ROOT — see apps/api/Dockerfile for why.
 
 # -------------------------------------------------------------- build -------
-FROM node:22-alpine AS build
+FROM public.ecr.aws/docker/library/node:26.7.0-alpine3.23 AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
