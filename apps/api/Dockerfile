@@ -5,7 +5,7 @@
 # workspace cannot install.
 
 # --------------------------------------------------------------- deps -------
-FROM public.ecr.aws/docker/library/node:26.7.0-alpine3.23 AS deps
+FROM public.ecr.aws/docker/library/node:26.10.0-alpine3.24 AS deps
 WORKDIR /app
 
 # Prisma's query engine links against OpenSSL on musl.
@@ -27,7 +27,7 @@ RUN npm run prisma:generate -w @sh-hrms/api \
  && npm run build -w @sh-hrms/api
 
 # ------------------------------------------------------------ runtime -------
-FROM public.ecr.aws/docker/library/node:26.7.0-alpine3.23 AS runtime
+FROM public.ecr.aws/docker/library/node:26.10.0-alpine3.24 AS runtime
 WORKDIR /app
 RUN apk add --no-cache openssl
 ENV NODE_ENV=production
@@ -41,6 +41,6 @@ COPY --chown=node:node apps/api/docker-entrypoint.sh /usr/local/bin/entrypoint.s
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 USER node
-EXPOSE 4000
+EXPOSE 3000
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["npm", "run", "start:prod", "-w", "@sh-hrms/api"]

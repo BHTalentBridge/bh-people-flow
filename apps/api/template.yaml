@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "This template deploys a backend-api for people flow service on ECS Fargate"
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - staging
+      - production
+  ProjectName:
+    Type: String
+    Description: Enter Project Name
+    Default: people-flow
+  AssignPublicIP:
+    Type: String
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+    Default: DISABLED
+  ContainerPort:
+    Type: String
+    Description: people-flow-api(3000)
+    Default: 3000
+  Cpu:
+    Type: String
+    Description: .25 vCPU, .5 vCPU, 1 vCPU, 2 vCPU, 4 vCPU
+    AllowedValues:
+    - 256
+    - 512
+    - 1024
+    - 2048
+    - 4096
+  Memory:
+    Type: String 
+    Description:  
+      0.5GB, 1GB, 2GB, 3GB, 4GB, 5GB
+    AllowedValues:
+    - 0.5GB
+    - 1GB
+    - 2GB
+    - 3GB
+    - 4GB
+    - 5GB
+  DesiredCount:
+    Type: Number
+    Default: 0
+  ServiceName:
+    Type: String
+    Description: 'Service Name'
+    Default: people-flow-api
+  ECSServiceName:
+    Type: String
+    Description: 'ECS Service Name'
+    Default: MSPeopleFlowAPI
+  JWTExpiresIn:
+    Type: String
+    Description: 'JWT Expires In'
+    Default: 7d
+  NodeEnvironment:
+    Type: String
+    Description: 'Node Environment'
+    Default: production
+  # MailFrom:
+  #   Type: String
+  #   Description: 'Mail From'
+  #   Default: "People Flow admin@cognify.education"
+  WebOrigin:
+    Type: String
+    Description: 'Web Origin'
+    Default: https://people-flow-dev.blackhives.com/,http://localhost:3000/ 
+  BaseUrl:
+    Type: String
+    Description: 'Base URL'
+    Default: https://people-flow-dev.blackhives.com/
+  S3BucketName:
+    Type: String
+    Description: 'S3 Bucket Name'
+    Default: dev--people-flow-bucket
+# Conditions:
+#   IsProd:
+#     Fn::Equals:
+#       - !Ref Environment
+#       - prod
+
+Resources:
+#Task Definition Configuration
+  BackendAPITaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${Environment}-${ServiceName}'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu:  !Ref Cpu
+      Memory: !Ref Memory
+      ExecutionRoleArn: 
+        Fn::ImportValue:
+                !Sub ${Environment}-${ProjectName}-execution-role
+      TaskRoleArn: 
+        Fn::ImportValue:
+                !Sub ${Environment}-${ProjectName}-task-role
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: !Ref ServiceName
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ServiceRepo}:latest"
+          PortMappings:
+            - Name: !Ref ServiceName
+              ContainerPort: !Ref ContainerPort
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: PORT
+              Value: !Ref ContainerPort
+            - Name: WEB_ORIGIN
+              Value: !Ref WebOrigin
+            - Name: JWT_EXPIRES_IN
+              Value: !Ref JWTExpiresIn
+            # - Name: NODE_ENV
+            #   Value: !Ref NodeEnvironment
+            # - Name: BASE_URL
+            #   Value: !Ref BaseUrl
+            # - Name: SEED_APP_NAME
+            #   Value: "Talent Bridge"
+            # - Name: SEED_THEME_PRIMARY
+            #   Value: "#FF5733"
+            # - Name: SEED_THEME_SECONDARY
+            #   Value: "#3333FF"
+            # - Name: SEED_THEME_BG
+            #   Value: "#FFFFFF"
+            # - Name: SEED_THEME_TEXT
+            #   Value: "#000000"
+            # - Name: SEED_ASSET_LOGO_URL
+            #   Value: "https://via.placeholder.com/150"
+            # - Name: SEED_ASSET_FAVICON_URL
+            #   Value: "https://via.placeholder.com/32"
+            - Name: SEED_ADMIN_EMAIL
+              Value: admin@talentbridge.com
+            # - Name: AWS_REGION
+            #   Value: !Ref AWS::Region
+            # - Name: AWS_BUCKET_NAME
+            #   Value: !Ref S3BucketName
+            
+          Secrets:
+            - Name: JWT_SECRET
+              ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/ecs/global/JWT_SECRET"
+            - Name: DATABASE_URL
+              ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/ecs/global/DATABASE_URL"
+            - Name: SEED_ADMIN_PASSWORD
+              ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/ecs/${ServiceName}/SEED_ADMIN_PASSWORD"
+            - Name: SEED_ADMIN_NAME
+              ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/ecs/${ServiceName}/SEED_ADMIN_NAME"
+ 
+  #Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    #DeletionPolicy: Retain
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 5
+      HealthyThresholdCount: 5
+      HealthCheckPath: /health
+      Name: !Sub '${Environment}--${ServiceName}-tg'
+
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue: !Sub "${Environment}-${ProjectName}-VPCID"
+#Listener Rule
+  BackendAPIListenerRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+        Priority: 4
+        ListenerArn:
+          Fn::ImportValue:
+            !Sub  ${Environment}-${ProjectName}-https-listner-arn
+        Conditions: 
+          -
+            Field: "host-header"
+            Values:
+              - "people-flow-dev.blackhives.com"
+          -
+            Field: "path-pattern"
+            Values:
+              - "/api/*"
+        Actions: 
+          - 
+            Type: "forward"
+            TargetGroupArn: !Ref TargetGroup
+            Order: 1
+            ForwardConfig: 
+                TargetGroups: 
+                  - 
+                    TargetGroupArn: !Ref TargetGroup
+                    Weight: 1
+                TargetGroupStickinessConfig: 
+                    Enabled: false
+  #ECR Repository
+  ServiceRepo: 
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: !Sub '${Environment}-${ServiceName}'
+      ImageScanningConfiguration: 
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Only keep 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+              },
+              "action": { "type": "expire" }
+            }]
+          }
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${Environment}-${ServiceName}'
+      RetentionInDays: 30
+#Service Definition
+  BackendAPIService:
+    Type: AWS::ECS::Service
+    Properties: 
+      ServiceName: !Ref ECSServiceName
+      Cluster: !Sub '${Environment}-${ProjectName}-cluster'
+      TaskDefinition: !Ref BackendAPITaskDefinition
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      DesiredCount: !Ref DesiredCount
+      HealthCheckGracePeriodSeconds: 30
+      ServiceConnectConfiguration:
+        Enabled: true 
+        Namespace: !Sub "${ProjectName}.${Environment}"
+        Services: 
+          - PortName: !Ref ServiceName
+            DiscoveryName: !Ref ServiceName
+            ClientAliases:
+              - DnsName: !Ref ServiceName
+                Port: !Ref ContainerPort
+      NetworkConfiguration: 
+        AwsvpcConfiguration:
+          AssignPublicIp: !Ref AssignPublicIP
+          Subnets:
+          - Fn::ImportValue: !Sub "${Environment}-${ProjectName}-PrivateSubnet1"
+          - Fn::ImportValue: !Sub "${Environment}-${ProjectName}-PrivateSubnet2"
+          - Fn::ImportValue: !Sub "${Environment}-${ProjectName}-PrivateSubnet3"
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${Environment}-${ProjectName}-internal-sg"
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      LoadBalancers:
+        - ContainerName: !Ref ServiceName
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+  
+# # Autoscaling Target for Auth Service
+#   ScalableTargetAcademicAPI:
+#     Condition: IsProd
+#     Type: AWS::ApplicationAutoScaling::ScalableTarget
+#     Properties:
+#       MinCapacity: !If
+#         - IsProd
+#         - 1
+#         - 1
+#       MaxCapacity: !If
+#         - IsProd
+#         - 5
+#         - 1
+#       ResourceId: !Join
+#         - /
+#         - - service
+#           - !Sub ${Environment}-rideart-cluster
+#           - !GetAtt AuthService.Name
+#       ScalableDimension: ecs:service:DesiredCount
+#       ServiceNamespace: ecs
+#       RoleARN: !ImportValue
+#         Fn::Sub: ${Environment}-auto-scaling-role
+
+  # Scaling Policy for CPU Utilization
+  # ScalingPolicyAuthCPU:
+  #   Condition: IsProd
+  #   Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  #   Properties:
+  #     PolicyName: ScalingPolicyAuthCPU
+  #     PolicyType: TargetTrackingScaling
+  #     ScalingTargetId: !Ref ScalableTargetAuth
+  #     TargetTrackingScalingPolicyConfiguration:
+  #       PredefinedMetricSpecification:
+  #         PredefinedMetricType: ECSServiceAverageCPUUtilization
+  #       ScaleInCooldown: 60
+  #       ScaleOutCooldown: 60
+  #       TargetValue: 70 
+
+  # Scaling Policy for Memory Utilization
+  # ScalingPolicyAuthMemory:
+  #   Condition: IsProd
+  #   Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  #   Properties:
+  #     PolicyName: ScalingPolicyAuthMemory
+  #     PolicyType: TargetTrackingScaling
+  #     ScalingTargetId: !Ref ScalableTargetAuth
+  #     TargetTrackingScalingPolicyConfiguration:
+  #       PredefinedMetricSpecification:
+  #         PredefinedMetricType: ECSServiceAverageMemoryUtilization
+  #       ScaleInCooldown: 60
+  #       ScaleOutCooldown: 60
+  #       TargetValue: 70 
