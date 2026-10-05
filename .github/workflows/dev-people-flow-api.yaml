@@ -9,11 +9,7 @@ on:
       - 'package-lock.json'
       - '!apps/api/template.yaml'
       - '!**.md'
-  pull_request:
-    types:
-      - closed
-    branches:
-      - main
+      - '!.github/**'
   workflow_dispatch:
 
 permissions:

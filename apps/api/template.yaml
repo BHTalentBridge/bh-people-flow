@@ -68,11 +68,7 @@ Parameters:
   WebOrigin:
     Type: String
     Description: 'Web Origin'
-    Default: https://people-flow-dev.blackhives.com/,http://localhost:3000/ 
-  BaseUrl:
-    Type: String
-    Description: 'Base URL'
-    Default: https://people-flow-dev.blackhives.com/
+    Default: https://peopleflow-dev.blackhives.com,http://localhost:5173
   S3BucketName:
     Type: String
     Description: 'S3 Bucket Name'

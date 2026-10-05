@@ -8,8 +8,14 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bufferLogs: false });
 
   app.setGlobalPrefix('api');
+  // Browsers send Origin as scheme://host[:port] with no path, so entries like
+  // "https://example.com/ " would never match unless normalised.
+  const webOrigins = (process.env.WEB_ORIGIN ?? 'http://localhost:5173')
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
   app.enableCors({
-    origin: (process.env.WEB_ORIGIN ?? 'http://localhost:5173').split(','),
+    origin: webOrigins,
     credentials: true,
   });
   app.useGlobalPipes(
