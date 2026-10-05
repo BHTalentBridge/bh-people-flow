@@ -1,0 +1,156 @@
+name: DEV PEOPLE-FLOW-WEB build & deploy
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/web/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '!apps/web/template.yaml'
+      - '!**.md'
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+    paths:
+      - 'apps/web/**'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+permissions:
+    id-token: write   # This is required for requesting the assume role JWT
+    contents: read    # This is required for actions/checkout
+
+env:
+  AWS_REGION: ap-southeast-5
+  PROJECT_NAME: people-flow
+  SERVICE_NAME: people-flow-web
+  ENVIRONMENT: dev
+  ECR_REPOSITORY: dev-people-flow-web
+  ECS_CLUSTER: dev-talentbridge-cluster
+  ECS_SERVICE: MSPeopleFlowWeb
+  ECS_TASK_DEFINITION: dev-people-flow-web
+  OIDC_ROLE_ARN: ${{ vars.OIDC_ROLE_ARN }}
+
+jobs:
+
+  build:
+    runs-on: ubuntu-24.04-arm
+    # Run on push or when PR is merged (not just closed)
+    if: |
+      (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'development')) ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+      (github.event_name == 'workflow_dispatch')
+    outputs:
+      image_tag: ${{ steps.build-image.outputs.image_tag }}
+      image_uri: ${{ steps.build-image.outputs.image_uri }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+
+      - name: Configure AWS Credentials for GitHub Role
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Login to AWS ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag and push image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          COMMIT_HASH=$(echo "${{ github.sha }}" | cut -c1-10)
+          echo "Building linux/arm64 image with tag: $COMMIT_HASH"
+
+          # Native arm64 runner, so this image is linux/arm64 without emulation.
+          # Context is the repo root: apps/web/Dockerfile installs the npm workspace from there.
+          docker build \
+            --file apps/web/Dockerfile \
+            --tag "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$COMMIT_HASH" \
+            --tag "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest" \
+            .
+
+          docker push "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$COMMIT_HASH"
+          docker push "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
+
+          echo "image_tag=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
+          echo "image_uri=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$COMMIT_HASH" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only deploy to ECS from main branch
+    if: |
+      github.ref_name == 'main' || github.ref_name == 'development' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main' && github.event.pull_request.merged == true)
+
+    steps:
+      - name: Configure AWS Credentials for GitHub Role
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Get current task definition
+        id: get-task-def
+        run: |
+          echo "Retrieving current task definition for ${{ env.ECS_TASK_DEFINITION }}"
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --query 'taskDefinition' \
+            --output json > task-def.json
+
+      - name: Create new task definition with updated image
+        id: update-task-def
+        env:
+          IMAGE_URI: ${{ needs.build.outputs.image_uri }}
+        run: |
+          echo "Creating new task definition with image: $IMAGE_URI"
+
+          # Update the image and pin ARM64, matching RuntimePlatform in apps/web/template.yaml.
+          jq --arg IMAGE "$IMAGE_URI" \
+             --arg CONTAINER_NAME "${{ env.SERVICE_NAME }}" \
+             '.containerDefinitions |= map(
+               if .name == $CONTAINER_NAME then
+                 .image = $IMAGE
+               else .
+               end
+             ) |
+             .runtimePlatform = {cpuArchitecture: "ARM64", operatingSystemFamily: "LINUX"} |
+             del(.taskDefinitionArn, .revision, .status, .registeredAt, .registeredBy, .requiresAttributes, .compatibilities)' \
+             task-def.json > new-task-def.json
+
+      - name: Register new task definition
+        id: register-task-def
+        run: |
+          NEW_TASK_INFO=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-def.json)
+
+          NEW_REVISION=$(echo $NEW_TASK_INFO | jq -r '.taskDefinition.revision')
+          echo "New task definition revision: $NEW_REVISION"
+          echo "task_revision=$NEW_REVISION" >> $GITHUB_OUTPUT
+
+      - name: Update ECS Service with new task definition
+        env:
+          TASK_REVISION: ${{ steps.register-task-def.outputs.task_revision }}
+        run: |
+          echo "Updating ECS service to use task definition revision: $TASK_REVISION"
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --task-definition ${{ env.ECS_TASK_DEFINITION }}:$TASK_REVISION \
+            --region ${{ env.AWS_REGION }} > /dev/null
+
+          echo "✅ ECS service updated successfully with new task definition revision $TASK_REVISION"

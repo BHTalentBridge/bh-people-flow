@@ -21,7 +21,7 @@ async function bootstrap() {
   );
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  const port = Number(process.env.PORT ?? 4000);
+  const port = Number(process.env.PORT ?? 3000);
   await app.listen(port);
   new Logger('Bootstrap').log(`SH-HRMS API listening on http://localhost:${port}/api`);
 }

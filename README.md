@@ -18,7 +18,7 @@ npm install
 createdb sh_hrms                    # skip if it already exists
 npm run db:migrate                  # apply the schema
 npm run db:seed                     # create the Administrator account
-npm run dev                         # API on :4000, web on :5173
+npm run dev                         # API on :3000, web on :5173
 ```
 
 Open http://localhost:5173.
@@ -62,7 +62,7 @@ Admins. Leave works the same way.
 DATABASE_URL="postgresql://<user>@localhost:5432/sh_hrms?schema=public"
 JWT_SECRET="change-me-in-production"
 JWT_EXPIRES_IN="7d"
-PORT=4000
+PORT=3000
 WEB_ORIGIN="http://localhost:5173"
 ```
 
@@ -85,7 +85,7 @@ Open http://localhost:8080.
 | | |
 |---|---|
 | Web | `http://localhost:8080` — override with `WEB_PORT` |
-| API | `api:4000` inside the compose network; not published to the host |
+| API | `api:3000` inside the compose network; not published to the host |
 | Database | `localhost:5432` — override with `DB_PORT`, for psql or DBeaver |
 
 The database lives in the `db-data` volume: `docker compose down` keeps it, `docker compose down -v`

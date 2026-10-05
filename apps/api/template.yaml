@@ -153,9 +153,9 @@ Resources:
             - Name: DATABASE_URL
               ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/ecs/global/DATABASE_URL"
             - Name: SEED_ADMIN_PASSWORD
-              ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/ecs/${ServiceName}/SEED_ADMIN_PASSWORD"
+              ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/ecs/global/SEED_ADMIN_PASSWORD"
             - Name: SEED_ADMIN_NAME
-              ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/ecs/${ServiceName}/SEED_ADMIN_NAME"
+              ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/ecs/global/SEED_ADMIN_NAME"
  
   #Target Group
   TargetGroup:
@@ -166,7 +166,7 @@ Resources:
       HealthCheckTimeoutSeconds: 5
       UnhealthyThresholdCount: 5
       HealthyThresholdCount: 5
-      HealthCheckPath: /health
+      HealthCheckPath: /api/health
       Name: !Sub '${Environment}--${ServiceName}-tg'
 
       Port: 80
@@ -189,7 +189,7 @@ Resources:
           -
             Field: "host-header"
             Values:
-              - "people-flow-dev.blackhives.com"
+              - "peopleflow-dev.blackhives.com"
           -
             Field: "path-pattern"
             Values:

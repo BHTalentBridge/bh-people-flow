@@ -3,11 +3,12 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - '**.md'
-      - '.github/**'
-      - 'docs/**'
-      - 'template.yaml'
+    paths:
+      - 'apps/api/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '!apps/api/template.yaml'
+      - '!**.md'
   pull_request:
     types:
       - closed
