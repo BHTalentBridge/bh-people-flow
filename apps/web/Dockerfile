@@ -3,7 +3,7 @@
 # The build context is the REPO ROOT — see apps/api/Dockerfile for why.
 
 # -------------------------------------------------------------- build -------
-FROM public.ecr.aws/docker/library/node:26.7.0-alpine3.23 AS build
+FROM public.ecr.aws/docker/library/node:26.10.0-alpine3.24 AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -21,7 +21,7 @@ COPY apps/web apps/web
 RUN npm run build -w @sh-hrms/web
 
 # ------------------------------------------------------------ runtime -------
-FROM nginx:alpine AS runtime
+FROM public.ecr.aws/docker/library/nginx:stable-alpine AS runtime
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/apps/web/dist /usr/share/nginx/html
 EXPOSE 80

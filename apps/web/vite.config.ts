@@ -6,7 +6,7 @@ import path from 'node:path';
 // Dev and preview both proxy /api, so a production build can be exercised
 // locally (`npm run build && npx vite preview`) against the same API without
 // tripping CORS — dev-mode timings are not representative of the real thing.
-const proxy = { '/api': { target: 'http://localhost:4000', changeOrigin: true } };
+const proxy = { '/api': { target: 'http://localhost:3000', changeOrigin: true } };
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],

@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "This template deploys the web frontend (nginx + SPA) for people flow service on ECS Fargate"
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - staging
+      - production
+  ProjectName:
+    Type: String
+    Description: Enter Project Name
+    Default: people-flow
+  AssignPublicIP:
+    Type: String
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+    Default: DISABLED
+  ContainerPort:
+    Type: String
+    Description: nginx listen port (apps/web/nginx.conf)
+    Default: 80
+  Cpu:
+    Type: String
+    Description: .25 vCPU, .5 vCPU, 1 vCPU, 2 vCPU, 4 vCPU
+    AllowedValues:
+    - 256
+    - 512
+    - 1024
+    - 2048
+    - 4096
+    Default: 256
+  Memory:
+    Type: String
+    Description:
+      0.5GB, 1GB, 2GB, 3GB, 4GB, 5GB
+    AllowedValues:
+    - 0.5GB
+    - 1GB
+    - 2GB
+    - 3GB
+    - 4GB
+    - 5GB
+    Default: 0.5GB
+  DesiredCount:
+    Type: Number
+    Default: 0
+  ServiceName:
+    Type: String
+    Description: 'Service Name'
+    Default: people-flow-web
+  ECSServiceName:
+    Type: String
+    Description: 'ECS Service Name'
+    Default: MSPeopleFlowWeb
+  DomainName:
+    Type: String
+    Description: 'Host header shared with the API listener rule'
+    Default: peopleflow-dev.blackhives.com
+  ListenerRulePriority:
+    Type: Number
+    Description: 'Must be a higher number than the API rule (4) so /api/* is matched first'
+    Default: 5
+
+Resources:
+#Task Definition Configuration
+  WebTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${Environment}-${ServiceName}'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref Cpu
+      Memory: !Ref Memory
+      ExecutionRoleArn:
+        Fn::ImportValue:
+                !Sub ${Environment}-${ProjectName}-execution-role
+      TaskRoleArn:
+        Fn::ImportValue:
+                !Sub ${Environment}-${ProjectName}-task-role
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: !Ref ServiceName
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ServiceRepo}:latest"
+          PortMappings:
+            - Name: !Ref ServiceName
+              ContainerPort: !Ref ContainerPort
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: ecs
+
+  #Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 3
+      HealthyThresholdCount: 2
+      HealthCheckPath: /healthz
+      Name: !Sub '${Environment}--${ServiceName}-tg'
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue: !Sub "${Environment}-${ProjectName}-VPCID"
+
+#Listener Rule: same host as the API, catch-all path; the API's /api/* rule wins on priority.
+  WebListenerRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+        Priority: !Ref ListenerRulePriority
+        ListenerArn:
+          Fn::ImportValue:
+            !Sub  ${Environment}-${ProjectName}-https-listner-arn
+        Conditions:
+          -
+            Field: "host-header"
+            Values:
+              - !Ref DomainName
+          -
+            Field: "path-pattern"
+            Values:
+              - "/*"
+        Actions:
+          -
+            Type: "forward"
+            TargetGroupArn: !Ref TargetGroup
+            Order: 1
+            ForwardConfig:
+                TargetGroups:
+                  -
+                    TargetGroupArn: !Ref TargetGroup
+                    Weight: 1
+                TargetGroupStickinessConfig:
+                    Enabled: false
+  #ECR Repository
+  ServiceRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${Environment}-${ServiceName}'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Only keep 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${Environment}-${ServiceName}'
+      RetentionInDays: 30
+#Service Definition
+  WebService:
+    Type: AWS::ECS::Service
+    # The service can't attach to the target group until a listener rule references it.
+    DependsOn: WebListenerRule
+    Properties:
+      ServiceName: !Ref ECSServiceName
+      Cluster: !Sub '${Environment}-${ProjectName}-cluster'
+      TaskDefinition: !Ref WebTaskDefinition
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      DesiredCount: !Ref DesiredCount
+      HealthCheckGracePeriodSeconds: 30
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !Ref AssignPublicIP
+          Subnets:
+          - Fn::ImportValue: !Sub "${Environment}-${ProjectName}-PrivateSubnet1"
+          - Fn::ImportValue: !Sub "${Environment}-${ProjectName}-PrivateSubnet2"
+          - Fn::ImportValue: !Sub "${Environment}-${ProjectName}-PrivateSubnet3"
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${Environment}-${ProjectName}-internal-sg"
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      LoadBalancers:
+        - ContainerName: !Ref ServiceName
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
