@@ -65,6 +65,10 @@ Parameters:
   #   Type: String
   #   Description: 'Mail From'
   #   Default: "People Flow admin@cognify.education"
+  ListenerRulePriority:
+    Type: Number
+    Description: 'Must be a lower number than any other rule on the shared listener that matches /api/* without a host condition'
+    Default: 4
   WebOrigin:
     Type: String
     Description: 'Web Origin'
@@ -177,7 +181,7 @@ Resources:
   BackendAPIListenerRule:
     Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
     Properties:
-        Priority: 4
+        Priority: !Ref ListenerRulePriority
         ListenerArn:
           Fn::ImportValue:
             !Sub  ${Environment}-${ProjectName}-https-listner-arn
