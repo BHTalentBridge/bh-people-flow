@@ -13,7 +13,7 @@
     "db:migrate": "npm run prisma:migrate -w @sh-hrms/api",
     "db:seed": "npm run prisma:seed -w @sh-hrms/api",
     "db:reset": "npm run prisma:reset -w @sh-hrms/api",
-    "db:deploy": "npm run prisma:deploy -w @sh-hrms/api",
+    "db:deploy": "npm run prisma:deploy -w @sh-hrms/api && npm run db:ensure-admin -w @sh-hrms/api",
     "db:ensure-admin": "npm run db:ensure-admin -w @sh-hrms/api"
   },
   "devDependencies": {
